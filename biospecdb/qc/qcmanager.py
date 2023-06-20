@@ -1,4 +1,7 @@
-from .qcfilter import QcFilter, Symptoms, BioSample
+from .qcfilter import QcFilter
+from uploader.models import BioSample
+from uploader.models import Patient as Symptoms
+
 from typing import Callable, Union
 
 

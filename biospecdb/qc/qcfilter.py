@@ -1,14 +1,7 @@
 from abc import ABC, abstractmethod
 
-
-# just a stub emulating data model class
-class Symptoms:
-    pass
-
-
-# just a stub emulating data model class
-class BioSample:
-    pass
+from uploader.models import BioSample
+from uploader.models import Patient as Symptoms
 
 
 class QcFilter(ABC):

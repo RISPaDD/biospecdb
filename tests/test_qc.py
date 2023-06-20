@@ -1,6 +1,6 @@
 from biospecdb.qc.qcmanager import QcManager
 from biospecdb.qc.qcfilter import QcFilter
-from unittest import TestCase
+from django.test import TestCase
 
 
 class TestFilter(QcFilter):
