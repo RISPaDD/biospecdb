@@ -1,6 +1,7 @@
+import pytest
+
 from biospecdb.qc.qcmanager import QcManager
 from biospecdb.qc.qcfilter import QcFilter
-from django.test import TestCase
 
 
 class TestFilter(QcFilter):
@@ -9,7 +10,7 @@ class TestFilter(QcFilter):
         return True
 
 
-class QcTests(TestCase):
+class TestQc:
 
     def test_manager_add_filter(self):
         m = QcManager()
@@ -29,7 +30,7 @@ class QcTests(TestCase):
         def raise_on_val(x, y):
             raise Exception('error')
         f.validate = raise_on_val
-        with self.assertRaises(Exception):
+        with pytest.raises(Exception):
             f.validate(None, None)
         m.register_validator('f', f)
         val = m.validate(None, None)
