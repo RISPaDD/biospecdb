@@ -1,6 +1,6 @@
 django==4.2.5
 django-sql-explorer[charts]==3.2.1
-kaleido==0.2.1
+kaleido==0.2.1.post1
 openpyxl==3.1.2
 pandas==2.1.0
 plotly==5.17.0
