@@ -7,7 +7,7 @@ from uploader.charts import count_bool_observables, get_pie_chart, get_line_char
 @pytest.fixture()
 def query(request):
     sql_marker = request.node.get_closest_marker("sql")
-    sql = sql_marker.args[0] if sql_marker and sql_marker.args[0] else "select * from uploader_spectraldata"
+    sql = sql_marker.args[0] if sql_marker and sql_marker.args[0] else "select * from spectral_data"
 
     q = SimpleQueryFactory(sql=sql)
     results = q.execute_query_only()

@@ -19,7 +19,7 @@ class TestSQL:
             secure_name("; drop view my_table")
 
     def test_execute_sql(self, observables):
-        results = execute_sql("select * from uploader_observable order by name", db=self.db)
+        results = execute_sql("select * from observable order by name", db=self.db)
         observables = Observable.objects.all().order_by("name")
         for d1, d2 in zip(results, observables):
             assert d1["name"] == d2.name
@@ -33,7 +33,7 @@ class TestSQL:
                             f"""
                             create view {view} as
                             select *
-                            from uploader_observable
+                            from observable
                             """,
                             check=True,
                             limit=None,
@@ -55,7 +55,7 @@ class TestSQL:
                             f"""
                             create view {view} as
                             select *
-                            from uploader_observable
+                            from observable
                             """,
                             check=True,
                             limit=limit,
@@ -71,7 +71,7 @@ class TestSQL:
                         f"""
                         ceate view {view} as -- note typo in create
                         select *
-                        from uploader_observable
+                        from observable
                         """,
                         check=True,
                         db=self.db
@@ -84,7 +84,7 @@ class TestSQL:
                     f"""
                     create view {view} as
                     select *
-                    from uploader_observable
+                    from observable
                     """,
                     check=True,
                     db=self.db
@@ -95,7 +95,7 @@ class TestSQL:
                         f"""
                         ceate view {view} as -- note typo in create
                         select *
-                        from uploader_observable
+                        from observable
                         """,
                         check=True,
                         db=self.db
@@ -114,7 +114,7 @@ class TestSQL:
                     f"""
                         create view {view} as
                         select *
-                        from uploader_observable
+                        from observable
                         """,
                     db=self.db
                     )
@@ -125,9 +125,9 @@ class TestSQL:
             execute_sql(f"select * from {view}", db=self.db)
 
     def test_correct_db(self, mock_data_from_files):
-        resp = execute_sql("select * from uploader_patient", db=self.db)
+        resp = execute_sql("select * from patient", db=self.db)
         assert len(resp) == 10
 
     def test_incorrect_db(self, mock_data_from_files):
         with pytest.raises(OperationalError, match="no such table:"):
-            execute_sql("select * from uploader_patient", db="default")
+            execute_sql("select * from patient", db="default")

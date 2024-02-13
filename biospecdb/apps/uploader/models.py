@@ -69,6 +69,7 @@ class Center(UserBaseCenter):
 
 class UploadedFile(DatedModel):
     class Meta:
+        db_table = "bulk_upload"
         verbose_name = "Bulk Data Upload"
         get_latest_by = "updated_at"
 
@@ -150,19 +151,14 @@ class Patient(DatedModel):
     MAX_AGE = 150  # NOTE: HIPAA requires a max age of 90 to be stored. However, this is GDPR data so... :shrug:
 
     class Meta:
+        db_table = "patient"
         unique_together = [["patient_cid", "center"]]
         get_latest_by = "updated_at"
-
-    class Gender(TextChoices):
-        UNSPECIFIED = ("X", _("Unspecified"))  # NOTE: Here variation here act as aliases for bulk column ingestion.
-        MALE = ("M", _("Male"))  # NOTE: Here variation here act as aliases for bulk column ingestion.
-        FEMALE = ("F", _("Female"))  # NOTE: Here variation here act as aliases for bulk column ingestion.
 
     patient_id = models.UUIDField(unique=True,
                                   primary_key=True,
                                   default=uuid.uuid4,
                                   verbose_name="Patient ID")
-    gender = models.CharField(max_length=8, choices=Gender.choices, null=True, verbose_name="Gender (M/F)")
     patient_cid = models.CharField(max_length=128,
                                    null=True,
                                    blank=True,
@@ -172,9 +168,7 @@ class Patient(DatedModel):
     @classmethod
     def parse_fields_from_pandas_series(cls, series):
         """ Parse the pandas series for field values returning a dict. """
-        gender = get_field_value(series, cls, "gender")
-        gender = cls.Gender(gender)
-        return dict(gender=gender)
+        return {}
 
     def __str__(self):
         if self.patient_cid:
@@ -201,6 +195,7 @@ class Visit(DatedModel):
     """ Model a patient's visitation to collect health data and biological samples.  """
 
     class Meta:
+        db_table = "visit"
         get_latest_by = "updated_at"
 
     patient = models.ForeignKey(Patient, on_delete=models.CASCADE, related_name="visit")
@@ -245,7 +240,10 @@ class Visit(DatedModel):
         if self.previous_visit is not None:
             try:
                 patient_age = int(self.observation.get(observable__name="patient_age").observable_value)
-            except Observation.DoesNotExist:
+            except (Observation.DoesNotExist, ValueError):
+                # Note: ``ValueError`` accounts for ``self.observation`` when self.pk hasn't yet been set, since objs
+                # are cleaned before saving and the DB populates the pk. Relationships and their traversal aren't
+                # possible for objs without primary keys.
                 pass
             else:
                 try:
@@ -310,6 +308,17 @@ class Visit(DatedModel):
         return f"patient:{self.patient}_visit:{self.visit_number}"
 
 
+def validate_import(value):
+    """ Validate that ``value`` (fully-quilified-name) can be imported. """
+    try:
+        import_string(value)
+    except ImportError:
+        raise ValidationError(_("'%(a)s' cannot be imported. Server re-deployment may be required."
+                                " Please reach out to the server admin."),
+                              params=dict(a=value),
+                              code="invalid")
+
+
 class Observable(ModelWithViewDependency):
     """ Model an individual observable, observation, or health condition.
         A patient's instance are stored as models.Observation
@@ -331,6 +340,7 @@ class Observable(ModelWithViewDependency):
     sql_view_dependencies = ("uploader.models.VisitObservationsView",)
 
     class Meta:
+        db_table = "observable"
         get_latest_by = "updated_at"
         constraints = [models.UniqueConstraint(Lower("name"),
                                                name="unique_observable_name"),
@@ -338,6 +348,7 @@ class Observable(ModelWithViewDependency):
                                                name="unique_alias_name")]
 
     category = models.CharField(max_length=128, null=False, blank=False, choices=Category.choices)
+
     # NOTE: See above constraint for case-insensitive uniqueness.
     name = models.CharField(max_length=128)
     description = models.CharField(max_length=256)
@@ -348,6 +359,17 @@ class Observable(ModelWithViewDependency):
 
     # This represents the type/class for Observation.observable_value.
     value_class = models.CharField(max_length=128, default=Types.BOOL, choices=Types.choices)
+    value_choices = models.CharField(max_length=512,
+                                     blank=True,
+                                     null=True,
+                                     help_text="Supply comma separated text choices for STR value_classes."
+                                               " E.g., 'LOW, MEDIUM, HIGH'")
+    validator = models.CharField(max_length=128,
+                                 blank=True,
+                                 null=True,
+                                 help_text="This must be the fully qualified Python name."
+                                           " E.g., 'django.core.validators.validate_email'.",
+                                 validators=[validate_import])
 
     # A observable without a center is generic and accessible by any and all centers.
     center = models.ForeignKey(Center, null=True, blank=True, on_delete=models.PROTECT)
@@ -361,11 +383,28 @@ class Observable(ModelWithViewDependency):
         if not self.alias:
             self.alias = self.name.replace('_', ' ')
 
+        if self.value_choices and (Observable.Types(self.value_class) is not Observable.Types.STR):
+            raise ValidationError(_("Observable choices are only permitted of STR value_class, not '%(a)s'."),
+                                  params=dict(a=self.value_class))
+
+    @staticmethod
+    def list_choices(choices):
+        """ Convert a csv string of choices to a list. """
+        if choices:
+            return [x.strip().upper() for x in choices.split(',')]
+
+    @staticmethod
+    def djangofy_choices(choices):
+        """ Convert a csv string of choices to that needed by Django. """
+        if choices:
+            return [(x, x) for x in Observable.list_choices(choices)]
+
 
 class Observation(DatedModel):
     """ A patient's instance of models.Observable. """
 
     class Meta:
+        db_table = "observation"
         get_latest_by = "updated_at"
 
     visit = models.ForeignKey(Visit, on_delete=models.CASCADE, related_name="observation")
@@ -379,7 +418,10 @@ class Observation(DatedModel):
                                         help_text="Supersedes Visit.days_observed")
 
     # Str format for actual type/class spec'd by Observable.value_class.
-    observable_value = models.CharField(blank=True, null=True, default='', max_length=128)
+    observable_value = models.CharField(blank=True,
+                                        null=True,
+                                        default='',
+                                        max_length=128)
 
     def clean(self):
         """ Model validation. """
@@ -403,6 +445,15 @@ class Observation(DatedModel):
                                           "value": self.observable_value},
                                   code="invalid")
 
+        if choices := self.observable.value_choices:
+            if (value := str(self.observable_value).strip().upper()) not in Observable.list_choices(choices):
+                raise ValidationError(_("Value must be one of '%(a)s', not '%(b)s'"),
+                                      params=dict(a=choices, b=value))
+
+        if self.observable.validator:
+            func = import_string(self.observable.validator)
+            func(self.observable_value)
+
     @property
     def center(self):
         return self.visit.patient.center
@@ -415,6 +466,7 @@ class Instrument(DatedModel):
     """ Model the instrument/device used to measure spectral data (not the collection of the bio sample). """
 
     class Meta:
+        db_table = "instrument"
         get_latest_by = "updated_at"
 
     # Instrument.
@@ -447,6 +499,10 @@ class Instrument(DatedModel):
 
 
 class BioSampleType(DatedModel):
+    class Meta:
+        db_table = "bio_sample_type"
+        get_latest_by = "updated_at"
+
     name = models.CharField(max_length=128, verbose_name="Sample Type")
 
     def __str__(self):
@@ -457,22 +513,46 @@ class BioSample(DatedModel):
     """ Model biological sample and collection method. """
 
     class Meta:
+        db_table = "bio_sample"
         get_latest_by = "updated_at"
 
     visit = models.ForeignKey(Visit, on_delete=models.CASCADE, related_name="bio_sample")
 
     # Sample meta.
+    sample_cid = models.CharField(blank=True,
+                                  null=True,
+                                  max_length=256,
+                                  verbose_name="Sample Center ID")
+    sample_study_id = models.CharField(blank=True,
+                                       null=True,
+                                       max_length=256,
+                                       verbose_name="Sample Study ID")
+    sample_study_name = models.CharField(blank=True,
+                                         null=True,
+                                         max_length=256,
+                                         verbose_name="Sample Study Name")
     sample_type = models.ForeignKey(BioSampleType,
                                     on_delete=models.CASCADE,
                                     related_name="bio_sample",
                                     verbose_name="Sample Type")
-    sample_processing = models.CharField(default="None",
-                                         blank=True,
+    sample_processing = models.CharField(blank=True,
                                          null=True,
                                          max_length=128,
-                                         verbose_name="Sample Processing")
-    freezing_temp = models.FloatField(blank=True, null=True, verbose_name="Freezing Temperature")
-    thawing_time = models.IntegerField(blank=True, null=True, verbose_name="Thawing time")
+                                         verbose_name="Sample Processing Description")
+    sample_extraction = models.CharField(blank=True,
+                                         null=True,
+                                         max_length=128,
+                                         verbose_name="Sample Extraction Description")
+    sample_extraction_tube = models.CharField(blank=True,
+                                              null=True,
+                                              max_length=128,
+                                              verbose_name="Sample Extraction Tube Brand Name")
+    centrifuge_time = models.IntegerField(blank=True, null=True, verbose_name="Extraction Tube Centrifuge Time (s)")
+    centrifuge_rpm = models.IntegerField(blank=True, null=True, verbose_name="Extraction Tube Centrifuge RPM")
+    freezing_temp = models.FloatField(blank=True, null=True, verbose_name="Freezing Temperature (C)")
+    thawing_temp = models.FloatField(blank=True, null=True, verbose_name="Thawing Temperature (C)")
+    thawing_time = models.IntegerField(blank=True, null=True, verbose_name="Thawing time (s)")
+    freezing_time = models.IntegerField(blank=True, null=True, verbose_name="Freezing time (s)")
 
     @classmethod
     def parse_fields_from_pandas_series(cls, series):
@@ -480,9 +560,18 @@ class BioSample(DatedModel):
         sample_type = lower(get_field_value(series, cls, "sample_type"))
         sample_type = get_object_or_raise_validation(BioSampleType, name=sample_type)
         return dict(sample_type=sample_type,
+                    sample_cid=get_field_value(series, cls, "sample_cid"),
+                    sample_study_id=get_field_value(series, cls, "sample_study_id"),
+                    sample_study_name=get_field_value(series, cls, "sample_study_name"),
                     sample_processing=get_field_value(series, cls, "sample_processing"),
+                    sample_extraction=get_field_value(series, cls, "sample_extraction"),
+                    sample_extraction_tube=get_field_value(series, cls, "sample_extraction_tube"),
+                    centrifuge_time=get_field_value(series, cls, "centrifuge_time"),
+                    centrifuge_rpm=get_field_value(series, cls, "centrifuge_rpm"),
                     freezing_temp=get_field_value(series, cls, "freezing_temp"),
-                    thawing_time=get_field_value(series, cls, "thawing_time"))
+                    freezing_time=get_field_value(series, cls, "freezing_time"),
+                    thawing_time=get_field_value(series, cls, "thawing_time"),
+                    thawing_temp=get_field_value(series, cls, "thawing_temp"))
 
     @property
     def center(self):
@@ -493,6 +582,10 @@ class BioSample(DatedModel):
 
 
 class SpectraMeasurementType(DatedModel):
+    class Meta:
+        db_table = "spectra_measurement_type"
+        get_latest_by = "updated_at"
+
     name = models.CharField(max_length=128, verbose_name="Spectra Measurement")
 
     def __str__(self):
@@ -503,6 +596,7 @@ class SpectralData(DatedModel):
     """ Model spectral data measured by spectrometer instrument. """
 
     class Meta:
+        db_table = "spectral_data"
         verbose_name = "Spectral Data"
         verbose_name_plural = verbose_name
         get_latest_by = "updated_at"
@@ -705,8 +799,8 @@ class ObservationsView(SqlView, models.Model):
                d.value_class,
                s.days_observed,
                s.observable_value
-        FROM uploader_observation s
-        JOIN uploader_observable d ON d.id=s.observable_id
+        FROM observation s
+        JOIN observable d ON d.id=s.observable_id
         """  # nosec B608
         return sql, None
 
@@ -766,18 +860,18 @@ class FullPatientView(SqlView, models.Model):
     def sql(cls):
         sql = f"""
                 create view {cls._meta.db_table} as 
-                select p.patient_id, p.gender
+                select p.patient_id
                 ,      bst.name, bs.sample_processing, bs.freezing_temp, bs.thawing_time
                 ,      i.manufacturer, i.model
                 ,      sdt.name, sd.acquisition_time, sd.n_coadditions, sd.resolution, sd.data
                 ,      vs.*
-                  from uploader_patient p
-                  join uploader_visit v on p.patient_id=v.patient_id
-                  join uploader_biosample bs on bs.visit_id=v.id
-                  join uploader_biosampletype bst on bst.id=bs.sample_type_id
-                  join uploader_spectraldata sd on sd.bio_sample_id=bs.id
-                  join uploader_spectrameasurementtype sdt on sdt.id=sd.measurement_type_id
-                  join uploader_instrument i on i.id=sd.instrument_id
+                  from patient p
+                  join visit v on p.patient_id=v.patient_id
+                  join bio_sample bs on bs.visit_id=v.id
+                  join bio_sample_type bst on bst.id=bs.sample_type_id
+                  join spectral_data sd on sd.bio_sample_id=bs.id
+                  join spectra_measurement_type sdt on sdt.id=sd.measurement_type_id
+                  join instrument i on i.id=sd.instrument_id
                   left outer join v_visit_observations vs on vs.visit_id=v.id
                 """  # nosec B608
         return sql, None
@@ -801,6 +895,7 @@ def validate_qc_annotator_import(value):
 
 class QCAnnotator(DatedModel):
     class Meta:
+        db_table = "qc_annotator"
         get_latest_by = "updated_at"
 
     Types = Types
@@ -846,6 +941,7 @@ class QCAnnotator(DatedModel):
 class QCAnnotation(DatedModel):
 
     class Meta:
+        db_table = "qc_annotation"
         unique_together = [["annotator", "spectral_data"]]
         get_latest_by = "updated_at"
 
@@ -897,36 +993,3 @@ def get_center(obj):
             return
     elif hasattr(obj, "center"):
         return obj.center
-
-
-# This is Model B wo/ observable table https://miro.com/app/board/uXjVMAAlj9Y=/
-# class Observations(models.Model):
-#     visit = models.ForeignKey(Visit, on_delete=models.CASCADE, related_name="observations")
-#
-#     # SARS-CoV-2 (COVID) viral load indicators.
-#     Ct_gene_N = models.FloatField()
-#     Ct_gene_ORF1ab = models.FloatField()
-#     Covid_RT_qPCR = models.CharField(default=NEGATIVE, choices=(NEGATIVE, POSITIVE))
-#     suspicious_contact = models.BooleanField(default=False)
-#
-#     # Observations/Observables
-#     fever = models.BooleanField(default=False)
-#     dyspnoea = models.BooleanField(default=False)
-#     oxygen_saturation_lt_95 = models.BooleanField(default=False)
-#     cough = models.BooleanField(default=False)
-#     coryza = models.BooleanField(default=False)
-#     odinophagy = models.BooleanField(default=False)
-#     diarrhea = models.BooleanField(default=False)
-#     nausea = models.BooleanField(default=False)
-#     headache = models.BooleanField(default=False)
-#     weakness = models.BooleanField(default=False)
-#     anosmia = models.BooleanField(default=False)
-#     myalgia = models.BooleanField(default=False)
-#     no_appetite = models.BooleanField(default=False)
-#     vomiting = models.BooleanField(default=False)
-#     chronic_pulmonary_inc_asthma = models.BooleanField(default=False)
-#     cardiovascular_disease_inc_hypertension = models.BooleanField(default=False)
-#     diabetes = models.BooleanField(default=False)
-#     chronic_or_neuromuscular_neurological_disease = models.BooleanField(default=False)
-#
-#     more = models.JSONField()

@@ -21,40 +21,25 @@ from uploader.tests.conftest import bulk_upload, DATA_PATH
 @pytest.mark.django_db(databases=["default", "bsr"])
 class TestPatient:
     def test_creation(self, center):
-        Patient(gender=Patient.Gender.MALE, center=center).full_clean()
-        Patient(gender=Patient.Gender.FEMALE, center=center).full_clean()
-        Patient(gender=Patient.Gender.UNSPECIFIED, center=center).full_clean()
+        Patient(center=center).full_clean()
 
     def test_db_creation(self, center):
-        Patient.objects.create(gender=Patient.Gender.MALE, center=center).full_clean()
-        Patient.objects.create(gender=Patient.Gender.FEMALE, center=center).full_clean()
-        Patient.objects.create(gender=Patient.Gender.UNSPECIFIED, center=center).full_clean()
+        Patient.objects.create(center=center).full_clean()
+        Patient.objects.create(center=center).full_clean()
+        Patient.objects.create(center=center).full_clean()
 
         assert Patient.objects.count() == 3
 
-        Patient.objects.create(gender=Patient.Gender.MALE, center=center).full_clean()
+        Patient.objects.create(center=center).full_clean()
         assert Patient.objects.count() == 4
 
-        males = Patient.objects.filter(gender=Patient.Gender.MALE, center=center)
-        females = Patient.objects.filter(gender=Patient.Gender.FEMALE, center=center)
-        unspecified = Patient.objects.filter(gender=Patient.Gender.UNSPECIFIED, center=center)
-        
-        assert males.count() == 2
-        assert females.count() == 1
-        assert unspecified.count() == 1
-        
-        assert males[0].patient_id != males[1].patient_id
+        qs = Patient.objects.filter(center=center)
+        assert qs[0].patient_id != qs[1].patient_id
 
     def test_short_name(self, center):
-        patient = Patient(gender=Patient.Gender.MALE, center=center)
+        patient = Patient(center=center)
         patient.full_clean()
         assert patient.short_id() in str(patient)
-
-    def test_gender_validation(self, center):
-        Patient(gender=Patient.Gender.MALE, center=center).full_clean()
-
-        with pytest.raises(ValidationError):
-            Patient(gender="blah").full_clean()
 
     def test_fixture_data(self, db, patients):
         assert Patient.objects.count() == 3
@@ -62,7 +47,7 @@ class TestPatient:
 
     def test_editable_patient_id(self, center):
         patient_id = uuid4()
-        Patient.objects.create(patient_id=patient_id, gender=Patient.Gender.FEMALE, center=center)
+        Patient.objects.create(patient_id=patient_id, center=center)
         assert Patient.objects.get(pk=patient_id)
 
     def test_center_validation(self, centers):
@@ -72,46 +57,40 @@ class TestPatient:
 
         # OK.
         patient_id = uuid4()
-        patient = Patient(patient_id=patient_id, gender=Patient.Gender.FEMALE, center=center)
+        patient = Patient(patient_id=patient_id, center=center)
         patient.full_clean()
 
         # Not OK.
         patient_id = uuid4()
         with pytest.raises(ValueError, match="Cannot assign"):
             patient = Patient(patient_id=patient_id,
-                              gender=Patient.Gender.FEMALE,
                               center=UserCenter.objects.get(name="SSEC"))
 
     def test_unique_cid_center_id(self, centers):
         center = UploaderCenter.objects.get(name="SSEC")
         cid = uuid4()
         Patient.objects.create(patient_id=uuid4(),
-                               gender=Patient.Gender.FEMALE,
                                center=center,
                                patient_cid=cid)
         # OK.
         Patient.objects.create(patient_id=uuid4(),
-                               gender=Patient.Gender.FEMALE,
                                center=center,
                                patient_cid=uuid4())
 
         # OK.
         Patient.objects.create(patient_id=uuid4(),
-                               gender=Patient.Gender.FEMALE,
                                center=UploaderCenter.objects.get(name="Imperial College London"),
                                patient_cid=cid)
 
         # Not OK.
         with pytest.raises(IntegrityError, match="UNIQUE constraint failed:"):
             Patient.objects.create(patient_id=uuid4(),
-                                   gender=Patient.Gender.FEMALE,
                                    center=center,
                                    patient_cid=cid)
 
     def test_pi_cid_validation(self, centers):
         id = uuid4()
         patient = Patient(patient_id=id,
-                          gender=Patient.Gender.UNSPECIFIED,
                           patient_cid=id,
                           center=Center.objects.get(name="SSEC"))
         with pytest.raises(ValidationError, match="Patient ID and patient CID cannot be the same"):
@@ -222,6 +201,46 @@ class TestObservable:
         with pytest.raises(IntegrityError, match="unique_alias_name"):
             Observable.objects.create(name="b", description="blah", alias="A", category=Observable.Category.COMORBIDITY)
 
+    def test_list_choices(self):
+        choices = "this, or, that"
+        assert Observable.list_choices(choices) == ["THIS", "OR", "THAT"]
+
+    def test_djangofy_choices(self):
+        choices = "this, or, that"
+        assert Observable.djangofy_choices(choices) == [("THIS", "THIS"),
+                                                        ("OR", "OR"),
+                                                        ("THAT", "THAT")]
+
+    def test_validator_import_validation(self):
+        Observable(name="A",
+                   description="blah",
+                   alias="a",
+                   category=Observable.Category.COMORBIDITY,
+                   validator="django.core.validators.validate_email").full_clean()
+
+        with pytest.raises(ValidationError, match="cannot be imported"):
+            Observable(name="A",
+                       description="blah",
+                       alias="a",
+                       category=Observable.Category.COMORBIDITY,
+                       validator="some.random.method").full_clean()
+
+    def test_choices_str_validation(self):
+        Observable(name="A",
+                   description="blah",
+                   alias="a",
+                   category=Observable.Category.COMORBIDITY,
+                   value_class="STR",
+                   value_choices="this,or,that").full_clean()
+
+        with pytest.raises(ValidationError, match="Observable choices are only permitted of STR value_class"):
+            Observable(name="A",
+                       description="blah",
+                       alias="a",
+                       category=Observable.Category.COMORBIDITY,
+                       value_class="BOOL",
+                       value_choices="this,or,that").full_clean()
+
 
 @pytest.mark.django_db(databases=["default", "bsr"])
 class TestInstrument:
@@ -280,6 +299,33 @@ class TestObservation:
         with pytest.raises(ValidationError, match="Patient observation observable category must belong to patient "
                                                   "center:"):
             Observation(visit=visit, observable=observable).full_clean()
+
+    def test_observable_choices(self, observables, visits):
+        Observation(visit=Visit.objects.last(),
+                    observable=Observable.objects.get(name="gender"),
+                    observable_value="non-binary").full_clean()
+
+        with pytest.raises(ValidationError, match="Value must be one of"):
+            Observation(visit=Visit.objects.last(),
+                        observable=Observable.objects.get(name="gender"),
+                        observable_value="blah-blah").full_clean()
+
+    def test_observable_validator(self, visits):
+        observable = Observable.objects.create(name="A",
+                                               description="blah",
+                                               alias="a",
+                                               category=Observable.Category.COMORBIDITY,
+                                               value_class="STR",
+                                               validator="django.core.validators.validate_email")
+
+        Observation(visit=Visit.objects.last(),
+                    observable=observable,
+                    observable_value="rando@gmail.com").full_clean()
+
+        with pytest.raises(ValidationError, match="Enter a valid email address"):
+            Observation(visit=Visit.objects.last(),
+                        observable=observable,
+                        observable_value="blahblah").full_clean()
 
 
 @pytest.mark.django_db(databases=["default", "bsr"])
@@ -477,7 +523,6 @@ class TestUploadedFile:
         for patient in Patient.objects.select_related("center").all():
             old_pids.append(patient.patient_id)
             new_patient_list.append(Patient(patient_cid=patient.patient_id,
-                                            gender=patient.gender,
                                             center=patient.center))
             patient.delete()
 

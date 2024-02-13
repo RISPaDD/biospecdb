@@ -7,7 +7,7 @@ from django.test import Client
 import pytest
 
 from user.models import BaseCenter, Center as UserCenter
-from uploader.admin import DataAdminSite
+from uploader.admin import DataAdminSite, RestrictedByCenterMixin
 from uploader.base_models import DatedModel, SqlView, ModelWithViewDependency
 import uploader.models
 
@@ -161,3 +161,28 @@ class TestAdminPage:
             response = c.get(url, follow=with_perm)
             expected_resp_code = 200 if with_perm else 403
             assert response.status_code == expected_resp_code
+
+
+@pytest.mark.django_db(databases=["default", "bsr"])
+class TestRestrictedByCenterMixin:
+    @pytest.fixture
+    def instrument(self, django_request, instruments):
+        instrument = uploader.models.Instrument.objects.latest()
+        user_center = django_request.user.center
+        instrument.center = uploader.models.Center.objects.get(name=user_center.name)
+        return instrument
+
+    def test_perm_without_object(self, django_request):
+        assert not RestrictedByCenterMixin()._has_perm(django_request, None)
+
+    def test_perm_without_user(self, django_request, instrument):
+        assert RestrictedByCenterMixin()._has_perm(django_request, instrument)
+
+        django_request.user = None
+        assert not RestrictedByCenterMixin()._has_perm(django_request, instrument)
+
+    def test_perm_without_user_center(self, django_request, instrument):
+        assert RestrictedByCenterMixin()._has_perm(django_request, instrument)
+
+        django_request.user.center = None
+        assert not RestrictedByCenterMixin()._has_perm(django_request, instrument)

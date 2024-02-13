@@ -297,5 +297,19 @@
       "created_at": "2013-09-06T00:00:00+00:00",
       "updated_at": "2013-09-06T00:00:00+00:00"
     }
+  },
+  {
+    "model": "uploader.Observable",
+    "pk": 24,
+    "fields": {
+      "category": "PATIENT_INFO",
+      "name": "gender",
+      "description": "Patient's gender at time of visit.",
+      "alias": "Gender",
+      "value_class": "STR",
+      "value_choices": "Prefer not to state, non-binary, Agender/I don’t identify with any gender, transgender woman, transgender man, woman, man",
+      "created_at": "2013-09-06T00:00:00+00:00",
+      "updated_at": "2013-09-06T00:00:00+00:00"
+    }
   }
 ]

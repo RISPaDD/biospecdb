@@ -3,6 +3,7 @@ from inspect import signature
 from django.apps import apps
 from django.core.exceptions import ObjectDoesNotExist
 from django.contrib import admin
+from django.contrib.auth import get_user_model
 from django.db.models import Q
 from django.db.utils import OperationalError
 from django import forms
@@ -12,19 +13,25 @@ from biospecdb.util import to_bool
 from .models import BioSample, Observable, Instrument, Patient, SpectralData, Observation, UploadedFile, Visit,\
     QCAnnotator, QCAnnotation, Center, get_center, BioSampleType, SpectraMeasurementType
 
+User = get_user_model()
+
 
 class RestrictedByCenterMixin:
     """ Restrict admin access to objects belong to user's center. """
     def _has_perm(self, request, obj):
-        user_center = request.user.center if request.user else None
+        if (request.user is None) or (obj is None):
+            return False # Strict security.
 
-        if (not user_center) or (obj is None):
-            # Those without centers "own" all.
-            return True  # security risk!?
+        try:
+            if not (user_center := request.user.center):
+                return False # Strict security.
+        except User.center.RelatedObjectDoesNotExist:
+            return False  # Strict security.
 
         obj_center = get_center(obj)
         if not obj_center:
-            # Objects without centers are "owned" by all.
+            # This func is called for new obj forms where obj.center obviously hasn't been set yet. In this scenario
+            # limited visibilty is defered to self.formfield_for_foreignkey.
             return True
 
         return obj_center == user_center
@@ -68,15 +75,52 @@ class RestrictedByCenterMixin:
         """ Limit center form fields to user's center, and set initial value as such.
             Exceptions are made for superusers.
         """
-        if db_field.name == "center" and request.user.center:
-            kwargs["initial"] = Center.objects.get(pk=request.user.center.pk)
-            if not request.user.is_superuser:
-                kwargs["queryset"] = Center.objects.filter(pk=request.user.center.pk)
-        elif db_field.name == "observable" and request.user.center:
-            center = Center.objects.get(pk=request.user.center.pk)
-            kwargs["queryset"] = Observable.objects.filter(Q(center=center) | Q(center=None))
+        field = super().formfield_for_foreignkey(db_field, request, **kwargs)
 
-        return super().formfield_for_foreignkey(db_field, request, **kwargs)
+        if request.user.is_superuser:
+            return field
+
+        # User.center can't be Null so this isn't actually possible, but just in case return an empty queryset.
+        try:
+            if not request.user.center:
+                field.queryset = field.queryset.none()
+                return field
+        except User.center.RelatedObjectDoesNotExist:
+            field.queryset = field.queryset.none()
+            return field
+
+        center = Center.objects.get(pk=request.user.center.pk)
+
+        if db_field.name == "center":
+            field.initial = center
+            field.queryset = field.queryset.filter(pk=request.user.center.pk)
+        elif db_field.name in ("observable", "instrument"):
+            # For these fields a Null center implies visible to all centers.
+            field.queryset = field.queryset.filter(Q(center=center) | Q(center=None))
+        elif db_field.name == "patient":
+            field.queryset = field.queryset.filter(center=center)
+        elif db_field.name == "visit":
+            field.queryset = field.queryset.filter(patient__center=center)
+        elif db_field.name == "previous_visit":
+            field.queryset = field.queryset.filter(patient__center=center)
+        elif db_field.name == "next_visit":
+            field.queryset = field.queryset.filter(patient__center=center)
+        elif db_field.name == "observation":
+            field.queryset = field.queryset.filter(visit__center=center)
+        elif db_field.name == "bio_sample":
+            field.queryset = field.queryset.filter(visit__patient__center=center)
+        elif db_field.name == "spectral_data":
+            field.queryset = field.queryset.filter(bio_sample__visit__patient__center=center)
+        elif db_field.name == "qc_annotation":
+            field.queryset = field.queryset.filter(spectral_data__bio_sample__visit__patient__center=center)
+        elif db_field.name in ("annotator", "measurement_type", "sample_type"):
+            # These aren't limited/restricted by center.
+            pass
+        else:
+            # For extra security raise rather than return leaky data.
+            raise NotImplementedError(f"Whoops! Looks like someone forgot to account for '{db_field.name}'!")
+
+        return field
 
 
 admin.site.register(BioSampleType)
@@ -212,18 +256,6 @@ class ObservableAdmin(RestrictedByCenterMixin, NestedModelAdmin):
 
 
 class ObservationMixin:
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        try:
-            # Only auto-populate "global" observables, i.e., those not related to a center (center=null).
-            query = Q(center=None)
-            if hasattr(self, "verbose_name"):  # Only Inline admins have verbose names.
-                query &= Q(category=self.verbose_name.upper())
-            kwargs = {"observables": iter(Observable.objects.filter(query))}
-        except OperationalError:
-            kwargs = {}
-        self.form = type("NewObservationForm", (ObservationInlineForm,), kwargs)
-
     readonly_fields = ["created_at", "updated_at"]  # TODO: Might need specific user group.
     ordering = ("-updated_at",)
 
@@ -266,7 +298,7 @@ class ObservationInlineForm(forms.ModelForm):
     observables = iter([])
 
     @staticmethod
-    def _get_widget(value_class):
+    def _get_widget(value_class, choices=()):
         value_class = Observable.Types(value_class)
         if value_class is Observable.Types.BOOL:
             widget = forms.CheckboxInput(check_test=to_bool)
@@ -275,7 +307,10 @@ class ObservationInlineForm(forms.ModelForm):
         elif value_class is Observable.Types.INT:
             widget = forms.NumberInput()
         elif value_class is Observable.Types.STR:
-            widget = forms.TextInput()
+            if choices:
+                widget = forms.Select(choices=Observable.djangofy_choices(choices))
+            else:
+                widget = forms.TextInput()
         else:
             raise NotImplementedError(f"Dev error: missing widget mapping for type '{value_class}'.")
         return widget
@@ -285,12 +320,26 @@ class ObservationInlineForm(forms.ModelForm):
         try:
             observable = next(self.observables)
             self.fields["observable"].initial = observable
-            self.fields["observable_value"].widget = self._get_widget(observable.value_class)
+            self.fields["observable_value"].widget = self._get_widget(observable.value_class,
+                                                                      choices=observable.value_choices)
+            self.fields["observable"].queryset = Observable.objects.filter(name=observable.name)
         except StopIteration:
             pass
 
 
 class ObservationInline(ObservationMixin, RestrictedByCenterMixin, NestedTabularInline):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        try:
+            # Only auto-populate "global" observables, i.e., those not related to a center (center=null).
+            query = Q(center=None)
+            if hasattr(self, "verbose_name"):  # Only Inline admins have verbose names.
+                query &= Q(category=self.verbose_name.upper())
+            kwargs = {"observables": iter(Observable.objects.filter(query))}
+        except OperationalError:
+            kwargs = {}
+        self.form = type("NewObservationForm", (ObservationInlineForm,), kwargs)
+
     extra = 0
     model = Observation
     show_change_link = True
@@ -304,7 +353,7 @@ class ObservationInline(ObservationMixin, RestrictedByCenterMixin, NestedTabular
         """ Limit observable to user's center (super's functionality) and admin category. """
         field = super().formfield_for_foreignkey(db_field, request, **kwargs)
         if db_field.name == "observable":
-            field.queryset = Observable.objects.filter(category=self.verbose_name.upper())
+            field.queryset = field.queryset.filter(category=self.verbose_name.upper())
         return field
 
     def get_queryset(self, request):
@@ -333,7 +382,8 @@ class ObservationInline(ObservationMixin, RestrictedByCenterMixin, NestedTabular
     @classmethod
     def factory(cls):
         return [type(f"{x}ObservationInline", (cls,), dict(verbose_name=x.lower(),
-                                                           verbose_name_plural=x.lower())) for x in Observable.Category]
+                                                           verbose_name_plural=x.lower(),
+                                                           classes=("collapse",))) for x in Observable.Category]
 
 
 @admin.register(Observation)
@@ -341,7 +391,7 @@ class ObservationAdmin(ObservationMixin, RestrictedByCenterMixin, NestedModelAdm
     search_fields = ["observable__name", "visit__patient__patient_id", "visit__patient__patient_cid"]
     search_help_text = "Observable, Patient ID or CID"
     date_hierarchy = "updated_at"
-    list_filter = ("visit__patient__center", "observable__category", "visit__patient__gender", "observable")
+    list_filter = ("visit__patient__center", "observable__category", "observable")
     list_display = ["patient_id", "observable_name", "visit"]
 
 
@@ -415,7 +465,7 @@ class SpectralDataAdmin(SpectralDataMixin, RestrictedByCenterMixin, NestedModelA
                    "measurement_type",
                    "bio_sample__sample_type",
                    "bio_sample__sample_processing",
-                   "bio_sample__visit__patient__gender")
+                   "bio_sample__visit__observation__observable")
 
 
 class SpectralDataAdminWithInlines(SpectralDataAdmin):
@@ -438,6 +488,38 @@ class BioSampleMixin:
     readonly_fields = ["created_at", "updated_at"]  # TODO: Might need specific user group.
     ordering = ("-updated_at",)
 
+    fieldsets = [
+        (
+            None,
+            {
+                "fields": ["visit"]
+            }
+        ),
+        (
+            "Sample Tagging",
+            {
+                "fields": [("sample_study_id", "sample_study_name", "sample_cid"),
+                           ("sample_type", "sample_processing")]
+            }
+        ),
+        (
+            "Sample Extraction",
+            {
+                "fields": ["sample_extraction",
+                           ("freezing_temp", "freezing_time"),
+                           ("thawing_temp", "thawing_time"),
+                           ("sample_extraction_tube", "centrifuge_rpm", "centrifuge_time")]
+            }
+        ),
+        (
+            "More Details",
+            {
+                "classes": ["collapse"],
+                "fields": ["created_at", "updated_at"],
+            }
+        ),
+    ]
+
     @admin.display
     def patient_id(self, obj):
         return obj.visit.patient_id
@@ -455,7 +537,7 @@ class BioSampleAdmin(BioSampleMixin, RestrictedByCenterMixin, NestedModelAdmin):
     search_fields = ["visit__patient__patient_id", "visit__patient__patient_cid"]
     search_help_text = "Patient ID or CID"
     date_hierarchy = "updated_at"
-    list_filter = ("visit__patient__center", "sample_type", "sample_processing")
+    list_filter = ("visit__patient__center", "sample_study_id", "sample_type", "sample_processing")
     list_display = ["patient_id", "sample_type"]
 
 
@@ -506,7 +588,10 @@ class VisitAdminMixin:
 
     @admin.display
     def gender(self, obj):
-        return obj.patient.gender
+        try:
+            return obj.observation.get(observable__name="gender").observable_value
+        except Observation.DoesNotExist:
+            pass
 
     def get_queryset(self, request):
         """ List only objects belonging to user's center. """
@@ -516,7 +601,9 @@ class VisitAdminMixin:
         return qs.filter(patient__center=Center.objects.get(pk=request.user.center.pk))
 
     def formfield_for_foreignkey(self, db_field, request, **kwargs):
-        """ Limit previous_visit to user's center (super's functionality) and admin category. """
+        """ Limit previous_visit to user's center (super's functionality) and only those visits belonging to the same
+            patient.
+        """
         field = super().formfield_for_foreignkey(db_field, request, **kwargs)
         if db_field.name == "previous_visit":
 
@@ -545,13 +632,13 @@ class VisitAdminMixin:
                     # Limit to all visits belonging to this patient (inc self - unfortunatley. It would be better to
                     # exclude (See below), however, there is no visit-self when looking at the patient level).
                     patient = Patient.objects.get(pk=object_id)
-                    field.queryset = Visit.objects.filter(patient=patient)
+                    field.queryset = field.queryset.filter(patient=patient)
                 elif model is Visit:
                     # Limit to all visits belonging to this patient (exc self - since a self-referential previous_visit
                     # doesn't make much sense).
                     visit = Visit.objects.get(id=object_id)
                     patient = visit.patient
-                    field.queryset = Visit.objects.filter(patient=patient).exclude(pk=object_id)
+                    field.queryset = field.queryset.filter(patient=patient).exclude(pk=object_id)
                 else:
                     return field
             except ObjectDoesNotExist:
@@ -594,7 +681,7 @@ class PatientAdmin(RestrictedByCenterMixin, NestedModelAdmin):
     readonly_fields = ["created_at", "updated_at"]  # TODO: Might need specific user group.
     date_hierarchy = "updated_at"
     ordering = ("-updated_at",)
-    list_filter = ("center", "gender")
+    list_filter = ("center", "visit__observation__observable")
     list_display = ["patient_id", "patient_cid", "gender", "age", "visit_count", "center"]
 
     @admin.display
@@ -608,6 +695,14 @@ class PatientAdmin(RestrictedByCenterMixin, NestedModelAdmin):
             else:
                 age = max(age, patient_age)
         return age
+
+    @admin.display
+    def gender(self, obj):
+        try:
+            if visit := obj.visit.last():
+                return visit.observation.get(observable__name="gender").observable_value
+        except Observation.DoesNotExist:
+            pass
 
     @admin.display
     def visit_count(self, obj):

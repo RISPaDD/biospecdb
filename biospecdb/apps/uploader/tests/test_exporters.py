@@ -25,7 +25,7 @@ def csv_export(request, monkeypatch, mock_data_from_files):
         monkeypatch.setattr(settings, "EXPLORER_DATA_EXPORTERS_ALLOW_DATA_FILE_ALIAS", allow_aliases.args[0])
 
     sql_marker = request.node.get_closest_marker("sql")
-    sql = sql_marker.args[0] if sql_marker and sql_marker.args[0] else "select * from uploader_spectraldata"
+    sql = sql_marker.args[0] if sql_marker and sql_marker.args[0] else "select * from spectral_data"
 
     q = SimpleQueryFactory(sql=sql)
     exporter = CSVExporter(query=q)
@@ -47,7 +47,7 @@ class TestExporters:
 
     @pytest.mark.include_data_files(True)
     @pytest.mark.parametrize(tuple(),
-                             [pytest.param(marks=pytest.mark.sql("select data, data from uploader_spectraldata")),
+                             [pytest.param(marks=pytest.mark.sql("select data, data from spectral_data")),
                               pytest.param(marks=pytest.mark.sql(None))])
     def test_no_duplicate_data_files(self, csv_export):
         assert zipfile.is_zipfile(csv_export)
@@ -87,6 +87,6 @@ class TestExporters:
             assert len(data.intensity) == 1798
 
     @pytest.mark.include_data_files(True)
-    @pytest.mark.sql("select * from uploader_patient")  # uploader_patient contains no spectral data.
+    @pytest.mark.sql("select * from patient")  # uploader_patient contains no spectral data.
     def test_no_data(self, csv_export):
         assert isinstance(csv_export, str)

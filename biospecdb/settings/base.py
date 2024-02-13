@@ -174,7 +174,11 @@ EXPLORER_SCHEMA_EXCLUDE_TABLE_PREFIXES = (
     'sessions',
     'admin',
     "django",
-    "explorer"
+    "explorer",
+    "user",
+    "catalog",
+    "uploader_center"
+
 )
 
 EXPLORER_DATA_EXPORTERS = [

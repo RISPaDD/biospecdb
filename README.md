@@ -78,7 +78,7 @@ For additional cmds see the [Conda cheat-sheet](https://docs.conda.io/projects/c
     data samples in the database. See [Quality Control Annotations](#quality-control-annotations).
 
 
-### DB Management:
+# DB Management
 We're currently using sqlite requiring the following setup instructions:
 
 For a quickstart run the provided script [rebuild_db.sh](scripts/dev/rebuild_db.sh), otherwise follow the instructions
@@ -120,11 +120,20 @@ The DB can be dumped to a file using the following:
 
 `` python manage.py dumpdata --indent 4 uploader --exclude uploader.uploadedfile --output test_data.json``
 
-### Usage:
+### Custom commands:
+
+ * ``python manage.py prune_files [--dry_run]``: Delete any and all orphaned data files.
+   * ``--dry_run``: Output files to be deleted but don't actually delete anything.
+ * ``python manage.py update_sql_views``: Create/update all custom SQL views in uploader.models.
+ * ``python manage.py run_qc_annotators [--no_reruns]``: Run all Quality Control annotators on the SpectralData database table.
+   * ``--no_reruns``: Don't run annotators on existing annotations, leave computed values as is.
+
+
+# Usage
 
     WIP.
 
-## Quality Control Annotations.
+# Quality Control Annotations
 
 Entries in the ``SpectralData`` table can be annotated by running ``QCAnnotators`` on them, thus producing a value
 stored as an ``ACAnnotation`` associated with the ``SpectralData`` entry. The ``SpectralData`` table contains the actual
@@ -194,3 +203,8 @@ Facilitates in building, testing & viewing the docs.
  * ``make clean``
  * ``make html``
  * To view the docs in your default browser run ``open docs/_build/html/index.html``.
+
+
+# The DB Model:
+
+![BioSpecDB Model.jpg](..%2F..%2F..%2FDownloads%2FBioSpecDB%20Model.jpg)
