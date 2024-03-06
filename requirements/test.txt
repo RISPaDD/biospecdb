@@ -1,7 +1,7 @@
 bandit==1.7.7
 factory-boy==3.3.0
 httpx==0.26.0
-pytest==7.4.3
+pytest==8.0.2
 pytest-cov==4.1.0
 pytest-django==4.8.0
 ruff==0.1.7
