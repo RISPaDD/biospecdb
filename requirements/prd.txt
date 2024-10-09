@@ -1,5 +1,5 @@
 boto3==1.34.152
-django==4.2.14
+django==4.2.16
 django-crontab==0.7.1
 django-decorator-include==3.0
 django-health-check==3.18.3
